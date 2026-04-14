@@ -1,0 +1,407 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: 'OpenClaw on AWS (Bedrock Claude Opus/Sonnet 4.6, SSM access)'
+
+Metadata:
+  AWS::CloudFormation::Interface:
+    ParameterGroups:
+      - Label:
+          default: "Basic Configuration"
+        Parameters:
+          - InstanceType
+          - KeyPairName
+      - Label:
+          default: "Network Configuration"
+        Parameters:
+          - CreateVPCEndpoints
+          - AllowedSSHCIDR
+
+Parameters:
+  InstanceType:
+    Type: String
+    Default: "t4g.large"
+    Description: "Graviton (ARM) instance type"
+    AllowedValues:
+      - "t4g.small"
+      - "t4g.medium"
+      - "t4g.large"
+      - "t4g.xlarge"
+
+  KeyPairName:
+    Type: String
+    Default: "none"
+    Description: "EC2 key pair (optional - set 'none' to skip, SSM is the primary access method)"
+
+  AllowedSSHCIDR:
+    Type: String
+    Default: ""
+    Description: "CIDR for SSH access (optional - leave empty for no SSH inbound)"
+
+  CreateVPCEndpoints:
+    Type: String
+    Default: "true"
+    Description: "Create VPC endpoints for private Bedrock/SSM access"
+    AllowedValues:
+      - "true"
+      - "false"
+
+Conditions:
+  CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
+  HasKeyPair: !Not [!Equals [!Ref KeyPairName, "none"]]
+  AllowSSH: !And
+    - !Not [!Equals [!Ref AllowedSSHCIDR, ""]]
+    - !Not [!Equals [!Ref KeyPairName, "none"]]
+
+Resources:
+  OpenClawWaitHandle:
+    Type: AWS::CloudFormation::WaitConditionHandle
+
+  OpenClawWaitCondition:
+    Type: AWS::CloudFormation::WaitCondition
+    DependsOn: OpenClawInstance
+    Properties:
+      Handle: !Ref OpenClawWaitHandle
+      Timeout: '900'
+      Count: 1
+
+  OpenClawVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: "10.0.0.0/16"
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.1.0/24"
+      MapPublicIpOnLaunch: true
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-public-subnet"
+
+  PrivateSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      CidrBlock: "10.0.2.0/24"
+      AvailabilityZone: !Select [0, !GetAZs '']
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-private-subnet"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref OpenClawVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: "0.0.0.0/0"
+      GatewayId: !Ref InternetGateway
+
+  SubnetRouteTableAssociation:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  VPCEndpointSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Condition: CreateEndpoints
+    Properties:
+      GroupDescription: "VPC endpoints security group"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref OpenClawSecurityGroup
+
+  BedrockRuntimeEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.bedrock-runtime'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssm'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  SSMMessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ssmmessages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  EC2MessagesEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Condition: CreateEndpoints
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.ec2messages'
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SubnetIds:
+        - !Ref PrivateSubnet
+      SecurityGroupIds:
+        - !Ref VPCEndpointSecurityGroup
+
+  S3GatewayEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      VpcId: !Ref OpenClawVPC
+      ServiceName: !Sub 'com.amazonaws.${AWS::Region}.s3'
+      VpcEndpointType: Gateway
+      RouteTableIds:
+        - !Ref PublicRouteTable
+
+  OpenClawInstanceRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ec2.amazonaws.com
+            Action: 'sts:AssumeRole'
+      ManagedPolicyArns:
+        - 'arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore'
+      Policies:
+        - PolicyName: BedrockAccess
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'bedrock:InvokeModel'
+                  - 'bedrock:InvokeModelWithResponseStream'
+                Resource:
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*::foundation-model/anthropic.*'
+                  - !Sub 'arn:${AWS::Partition}:bedrock:*:${AWS::AccountId}:inference-profile/us.anthropic.*'
+              - Effect: Allow
+                Action:
+                  - 'bedrock:ListFoundationModels'
+                  - 'bedrock:GetFoundationModel'
+                Resource: '*'
+        - PolicyName: S3ReadWrite
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 's3:GetObject'
+                  - 's3:PutObject'
+                  - 's3:DeleteObject'
+                  - 's3:ListBucket'
+                  - 's3:GetBucketLocation'
+                Resource: 'arn:aws:s3:::*'
+        - PolicyName: SSMParameter
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - 'ssm:PutParameter'
+                  - 'ssm:GetParameter'
+                Resource: !Sub 'arn:aws:ssm:${AWS::Region}:${AWS::AccountId}:parameter/openclaw/${AWS::StackName}/*'
+
+  OpenClawInstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      Roles:
+        - !Ref OpenClawInstanceRole
+
+  OpenClawSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: "OpenClaw - no inbound (SSM only), all outbound"
+      VpcId: !Ref OpenClawVPC
+      SecurityGroupIngress: !If
+        - AllowSSH
+        - - IpProtocol: tcp
+            FromPort: 22
+            ToPort: 22
+            CidrIp: !Ref AllowedSSHCIDR
+            Description: "SSH access"
+        - []
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: "0.0.0.0/0"
+
+  OpenClawInstance:
+    Type: AWS::EC2::Instance
+    Properties:
+      ImageId: !Sub '{{resolve:ssm:/aws/service/canonical/ubuntu/server/24.04/stable/current/arm64/hvm/ebs-gp3/ami-id}}'
+      InstanceType: !Ref InstanceType
+      KeyName: !If [HasKeyPair, !Ref KeyPairName, !Ref "AWS::NoValue"]
+      IamInstanceProfile: !Ref OpenClawInstanceProfile
+      NetworkInterfaces:
+        - AssociatePublicIpAddress: true
+          DeviceIndex: 0
+          GroupSet:
+            - !Ref OpenClawSecurityGroup
+          SubnetId: !Ref PublicSubnet
+      BlockDeviceMappings:
+        - DeviceName: /dev/sda1
+          Ebs:
+            VolumeSize: 50
+            VolumeType: gp3
+            DeleteOnTermination: true
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          exec > >(tee /var/log/openclaw-setup.log)
+          exec 2>&1
+          echo "=========================================="
+          echo "OpenClaw Setup: $(date)"
+          echo "=========================================="
+          export DEBIAN_FRONTEND=noninteractive
+
+          # Detect region (IMDSv2)
+          IMDS_TOKEN=$(curl -s -X PUT "http://169.254.169.254/latest/api/token" -H "X-aws-ec2-metadata-token-ttl-seconds: 21600" 2>/dev/null || echo "")
+          if [ -n "$IMDS_TOKEN" ]; then
+            AWS_REGION=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null || echo "")
+            INSTANCE_ID=$(curl -s -H "X-aws-ec2-metadata-token: $IMDS_TOKEN" http://169.254.169.254/latest/meta-data/instance-id 2>/dev/null || echo "")
+          fi
+          AWS_REGION=${!AWS_REGION:-"${AWS::Region}"}
+          INSTANCE_ID=${!INSTANCE_ID:-"unknown"}
+
+          # [1/6] System deps
+          apt-get update && apt-get upgrade -y && apt-get install -y unzip curl jq
+
+          # [2/6] AWS CLI
+          curl -s "https://awscli.amazonaws.com/awscli-exe-linux-$(arch).zip" -o "awscliv2.zip"
+          unzip -q awscliv2.zip && ./aws/install && rm -rf aws awscliv2.zip
+
+          # [3/6] SSM Agent
+          snap start amazon-ssm-agent || systemctl start amazon-ssm-agent
+
+          # [4/6] Node.js + OpenClaw (ubuntu user, nvm)
+          sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
+          cd ~
+          NVM_VERSION="v0.40.1"
+          for i in 1 2 3; do
+            curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
+            sleep 5
+          done
+          bash /tmp/nvm-install.sh && rm -f /tmp/nvm-install.sh
+          export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"
+          nvm install 22 && nvm use 22 && nvm alias default 22
+          npm config set registry https://registry.npmjs.org/
+          ARCH=$(uname -m)
+          if [ "$ARCH" = "aarch64" ]; then
+            npm install -g openclaw@latest --timeout=300000 --ignore-scripts || { npm cache clean --force && npm install -g openclaw@latest --timeout=300000 --ignore-scripts; }
+          else
+            npm install -g openclaw@latest --timeout=300000 || { npm cache clean --force && npm install -g openclaw@latest --timeout=300000; }
+          fi
+          grep -q 'NVM_DIR' ~/.bashrc || { echo 'export NVM_DIR="$HOME/.nvm"' >> ~/.bashrc; echo '[ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"' >> ~/.bashrc; }
+          UBUNTU_SCRIPT
+
+          # Create system-wide openclaw wrapper
+          OPENCLAW_MJS=$(find /home/ubuntu/.nvm -path "*/node_modules/openclaw/openclaw.mjs" 2>/dev/null | head -1)
+          NODE_BIN=$(find /home/ubuntu/.nvm -name node -type f 2>/dev/null | head -1)
+          [ -z "$OPENCLAW_MJS" ] || [ -z "$NODE_BIN" ] && { echo "FATAL: openclaw not found"; exit 1; }
+          printf '#!/bin/bash\nexec %s %s "$@"\n' "$NODE_BIN" "$OPENCLAW_MJS" > /usr/local/bin/openclaw
+          chmod +x /usr/local/bin/openclaw
+
+          # [5/6] Configure OpenClaw + Bedrock
+          sudo -u ubuntu mkdir -p /home/ubuntu/.aws /home/ubuntu/.openclaw /home/ubuntu/.config/environment.d
+          sudo -u ubuntu bash -c "printf '[default]\nregion = %s\noutput = json\n' '$AWS_REGION' > /home/ubuntu/.aws/config"
+          { echo "export AWS_REGION=$AWS_REGION"; echo "export AWS_DEFAULT_REGION=$AWS_REGION"; } >> /home/ubuntu/.bashrc
+          sudo -u ubuntu bash -c "{ echo AWS_REGION=$AWS_REGION; echo AWS_DEFAULT_REGION=$AWS_REGION; } > /home/ubuntu/.config/environment.d/aws.conf"
+          loginctl enable-linger ubuntu && systemctl start user@1000.service
+          GATEWAY_TOKEN=$(openssl rand -hex 24)
+
+          # Write base config
+          sudo -u ubuntu tee /home/ubuntu/.openclaw/openclaw.json > /dev/null << JSONEOF
+          {"gateway":{"mode":"local","port":18789,"bind":"loopback","controlUi":{"enabled":true,"allowInsecureAuth":true},"auth":{"mode":"token","token":"$GATEWAY_TOKEN"},"remote":{"token":"$GATEWAY_TOKEN"}},"commands":{"native":"auto","restart":true},"tools":{"exec":{"security":"full","ask":"off"}}}
+          JSONEOF
+
+          # Inject Bedrock models
+          sudo -u ubuntu bash -c "cd /home/ubuntu/.openclaw && jq '. + {\"models\":{\"mode\":\"replace\",\"providers\":{\"amazon-bedrock\":{\"baseUrl\":\"https://bedrock-runtime.$AWS_REGION.amazonaws.com\",\"api\":\"bedrock-converse-stream\",\"auth\":\"aws-sdk\",\"models\":[{\"id\":\"us.anthropic.claude-opus-4-6-v1\",\"name\":\"Claude Opus 4.6\",\"input\":[\"text\",\"image\"],\"contextWindow\":1000000,\"maxTokens\":128000},{\"id\":\"us.anthropic.claude-sonnet-4-6\",\"name\":\"Claude Sonnet 4.6\",\"input\":[\"text\",\"image\"],\"contextWindow\":200000,\"maxTokens\":64000}]}}},\"agents\":{\"defaults\":{\"model\":{\"primary\":\"amazon-bedrock/us.anthropic.claude-opus-4-6-v1\"},\"compaction\":{\"mode\":\"safeguard\"}}}}' openclaw.json > openclaw.tmp && mv openclaw.tmp openclaw.json"
+
+          # .env for aws-sdk auth (REQUIRED - OpenClaw reads creds from here)
+          sudo -u ubuntu bash -c "printf 'AWS_REGION=%s\nAWS_PROFILE=default\n' '$AWS_REGION' > /home/ubuntu/.openclaw/.env"
+          echo "export OPENCLAW_GATEWAY_TOKEN=$GATEWAY_TOKEN" >> /home/ubuntu/.bashrc
+
+          # [6/6] Start Gateway
+          for i in $(seq 1 15); do [ -S /run/user/1000/bus ] && break; sleep 2; done
+          sudo -H -u ubuntu XDG_RUNTIME_DIR=/run/user/1000 DBUS_SESSION_BUS_ADDRESS=unix:path=/run/user/1000/bus bash -c 'export HOME=/home/ubuntu NVM_DIR="$HOME/.nvm"; . "$NVM_DIR/nvm.sh"; openclaw gateway install; systemctl --user start openclaw-gateway.service || openclaw gateway &'
+          for i in $(seq 1 20); do ss -tlnp 2>/dev/null | grep -q ':18789' && break; sleep 3; done
+
+          # Save token to SSM Parameter Store
+          aws ssm put-parameter --name "/openclaw/${AWS::StackName}/gateway-token" --value "$GATEWAY_TOKEN" --type "SecureString" --region $AWS_REGION --overwrite || true
+          COMPLETE_URL="http://localhost:18789/?token=$GATEWAY_TOKEN"
+          unset GATEWAY_TOKEN
+
+          # Signal CloudFormation
+          apt-get install -y python3-pip 2>/dev/null
+          pip3 install --break-system-packages https://s3.amazonaws.com/cloudformation-examples/aws-cfn-bootstrap-py3-latest.tar.gz 2>/dev/null || true
+          CFN_SIGNAL=$(which cfn-signal 2>/dev/null || find /usr -name cfn-signal 2>/dev/null | head -1)
+          if [ -n "$CFN_SIGNAL" ]; then
+            $CFN_SIGNAL -e 0 -d "$COMPLETE_URL" -r "OpenClaw ready" '${OpenClawWaitHandle}'
+          else
+            curl -X PUT -H "Content-Type:" --data-binary "{\"Status\":\"SUCCESS\",\"Reason\":\"OpenClaw ready\",\"UniqueId\":\"openclaw\",\"Data\":\"$COMPLETE_URL\"}" "${OpenClawWaitHandle}"
+          fi
+          echo "Setup complete! $(date)"
+      Tags:
+        - Key: Name
+          Value: !Sub "${AWS::StackName}-instance"
+
+Outputs:
+  Step1InstallSSMPlugin:
+    Description: "STEP 1: Install SSM Session Manager Plugin"
+    Value: "https://docs.aws.amazon.com/systems-manager/latest/userguide/session-manager-working-with-install-plugin.html"
+  Step2PortForwarding:
+    Description: "STEP 2: Run on LOCAL computer (keep terminal open)"
+    Value: !Sub "aws ssm start-session --target ${OpenClawInstance} --region ${AWS::Region} --document-name AWS-StartPortForwardingSession --parameters '{\"portNumber\":[\"18789\"],\"localPortNumber\":[\"18789\"]}'"
+  Step3AccessURL:
+    Description: "STEP 3: Open in browser (after port forwarding)"
+    Value: !Select [1, !Split ['":"', !Select [0, !Split ['"}'  , !GetAtt OpenClawWaitCondition.Data]]]]
+  InstanceId:
+    Description: "EC2 Instance ID"
+    Value: !Ref OpenClawInstance
+  DefaultModel:
+    Description: "Default LLM model"
+    Value: "amazon-bedrock/us.anthropic.claude-opus-4-6-v1 (Claude Opus 4.6, 1M context)"
