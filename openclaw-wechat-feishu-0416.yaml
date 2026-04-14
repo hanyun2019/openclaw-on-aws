@@ -90,6 +90,11 @@ Parameters:
     NoEcho: true
     Description: "Feishu/Lark App Secret. Leave empty to skip Feishu setup."
 
+  S3BucketName:
+    Type: String
+    Default: ""
+    Description: "S3 bucket name for OpenClaw data storage (optional). Leave empty to skip S3 access."
+
 Conditions:
   UseBedrock: !Equals [!Ref EnableBedrock, "true"]
   CreateEndpoints: !Equals [!Ref CreateVPCEndpoints, "true"]
@@ -130,6 +135,7 @@ Conditions:
   CreateMantleEndpoint: !And [ Condition: CreateBedrockEndpoints, Condition: IsMantleSupportedRegion ]     
   EnableDocker: !Equals [!Ref EnableSandbox, "true"]
   HasFeishu: !Not [!Equals [!Ref FeishuAppId, ""]]
+  HasS3Bucket: !Not [!Equals [!Ref S3BucketName, ""]]
 
 Mappings:
   # Architecture detection based on instance type
@@ -351,18 +357,21 @@ Resources:
                     - 'bedrock:GetFoundationModel'
                   Resource: '*'
           - !Ref AWS::NoValue
-        - PolicyName: S3AccessPolicy
-          PolicyDocument:
-            Version: '2012-10-17'
-            Statement:
-              - Effect: Allow
-                Action:
-                  - 's3:PutObject'
-                  - 's3:GetObject'
-                  - 's3:ListBucket'
-                Resource:
-                  - 'arn:aws:s3:::openclaw-data-xxxxxx'
-                  - 'arn:aws:s3:::openclaw-data-xxxxxx/*'
+        - !If
+          - HasS3Bucket
+          - PolicyName: S3AccessPolicy
+            PolicyDocument:
+              Version: '2012-10-17'
+              Statement:
+                - Effect: Allow
+                  Action:
+                    - 's3:PutObject'
+                    - 's3:GetObject'
+                    - 's3:ListBucket'
+                  Resource:
+                    - !Sub 'arn:aws:s3:::${S3BucketName}'
+                    - !Sub 'arn:aws:s3:::${S3BucketName}/*'
+          - !Ref AWS::NoValue
         - PolicyName: SSMParameterPolicy
           PolicyDocument:
             Version: '2012-10-17'
@@ -520,19 +529,13 @@ Resources:
           sudo -u ubuntu bash << 'UBUNTU_SCRIPT'
           cd ~
           
-          # Install NVM (download, verify checksum, then execute)
+          # Install NVM
           NVM_VERSION="v0.40.1"
-          NVM_CHECKSUM="a25e3e29e4cd7a8bc3f822e076d018b5e3a75b7b48a6e2e5e8b3f1a2c3d4e5f6"
           for i in 1 2 3; do
-            curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" -o /tmp/nvm-install.sh && break
-            echo "NVM download attempt $i failed, retrying in 5s..."
+            curl -fsSL "https://raw.githubusercontent.com/nvm-sh/nvm/${!NVM_VERSION}/install.sh" | bash && break
+            echo "NVM install attempt $i failed, retrying in 5s..."
             sleep 5
           done
-          echo "$NVM_CHECKSUM /tmp/nvm-install.sh" | sha256sum -c - || {
-            echo "WARNING: NVM checksum verification failed, proceeding with caution"
-          }
-          bash /tmp/nvm-install.sh
-          rm -f /tmp/nvm-install.sh
           
           export NVM_DIR="$HOME/.nvm"
           [ -s "$NVM_DIR/nvm.sh" ] && . "$NVM_DIR/nvm.sh"
