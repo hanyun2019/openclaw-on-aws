@@ -652,7 +652,7 @@ Resources:
           fi
 
           sudo -u ubuntu tee /home/ubuntu/.openclaw/openclaw.json > /dev/null << JSONEOF
-          {"gateway":{"mode":"local","port":18789,"bind":"loopback","controlUi":{"enabled":true,"allowInsecureAuth":true},"auth":{"mode":"token","token":"$GATEWAY_TOKEN"},"remote":{"token":"$GATEWAY_TOKEN"}},"channels":{"feishu":{"enabled":$FEISHU_ENABLED,"appId":"$FEISHU_APPID","appSecret":"$FEISHU_APPSECRET","capabilities":{"voice":"all"}}},"plugins":{"entries":{"feishu":{"enabled":$FEISHU_ENABLED}}}}
+          {"gateway":{"mode":"local","port":18789,"bind":"loopback","controlUi":{"enabled":true,"allowInsecureAuth":true},"auth":{"mode":"token","token":"$GATEWAY_TOKEN"},"remote":{"token":"$GATEWAY_TOKEN"}},"channels":{"feishu":{"enabled":$FEISHU_ENABLED,"appId":"$FEISHU_APPID","appSecret":"$FEISHU_APPSECRET","capabilities":["voice"]}},"plugins":{"entries":{"feishu":{"enabled":$FEISHU_ENABLED}}}}
           JSONEOF
 
           # Inject Bedrock config if enabled
