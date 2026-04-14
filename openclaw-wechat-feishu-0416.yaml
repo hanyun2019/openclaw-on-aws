@@ -361,8 +361,8 @@ Resources:
                   - 's3:GetObject'
                   - 's3:ListBucket'
                 Resource:
-                  - 'arn:aws:s3:::openclaw-data-haowen'
-                  - 'arn:aws:s3:::openclaw-data-haowen/*'
+                  - 'arn:aws:s3:::openclaw-data-xxxxxx'
+                  - 'arn:aws:s3:::openclaw-data-xxxxxx/*'
         - PolicyName: SSMParameterPolicy
           PolicyDocument:
             Version: '2012-10-17'
